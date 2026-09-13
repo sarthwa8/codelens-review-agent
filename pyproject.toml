@@ -53,7 +53,6 @@ ignore = ["B008", "RUF012", "E501"]
 known-third-party = ["alembic"]
 
 [tool.mypy]
-python_version = "3.11"
 packages = ["app"]
 ignore_missing_imports = true
 warn_unused_ignores = true
