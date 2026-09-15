@@ -15,8 +15,20 @@ class Settings(BaseSettings):
     # Not validated here so that the worker and migrations can start without it;
     # the API refuses to boot with an empty secret (see app.main.create_app).
     github_webhook_secret: str = ""
+    # Fallback auth when no GitHub App is configured (read-only reviews, nothing posted back).
     github_token: str | None = None
     github_api_url: str = "https://api.github.com"
+    github_web_url: str = "https://github.com"
+    github_api_version: str = "2026-03-10"
+    # GitHub App: installation tokens for API access, check runs + PR reviews, and user sign-in.
+    github_app_id: str | None = None
+    github_app_client_id: str | None = None
+    github_app_client_secret: str | None = None
+    github_app_slug: str | None = None
+    github_app_private_key_path: Path | None = None
+    github_app_private_key: str | None = None  # inline PEM alternative to the path
+    # Where people reach the dashboard; used for OAuth callbacks and links posted to GitHub.
+    public_url: str = "http://localhost:3000"
     # "github" talks to the GitHub REST API; "local" reads bare/working git repos from disk
     # (used by the demo + replay benchmark so the stack can be exercised without GitHub).
     source_mode: Literal["github", "local"] = "github"
@@ -84,6 +96,19 @@ class Settings(BaseSettings):
             "ollama": self.ollama_model,
             "groq": self.groq_model,
         }[self.llm_provider]
+
+    @property
+    def github_app_configured(self) -> bool:
+        has_key = bool(self.github_app_private_key or self.github_app_private_key_path)
+        return bool((self.github_app_client_id or self.github_app_id) and has_key)
+
+    def github_app_private_key_pem(self) -> str:
+        if self.github_app_private_key:
+            # Env files often carry PEMs on one line with literal "\n" escapes.
+            return self.github_app_private_key.replace("\\n", "\n")
+        if self.github_app_private_key_path:
+            return self.github_app_private_key_path.read_text()
+        raise RuntimeError("GITHUB_APP_PRIVATE_KEY_PATH or GITHUB_APP_PRIVATE_KEY must be set")
 
     @property
     def effective_max_prompt_chars(self) -> int:
