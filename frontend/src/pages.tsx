@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import Markdown from "react-markdown";
 import { Link, useParams } from "react-router";
 import remarkGfm from "remark-gfm";
-import { api, type Commit, type ReviewDetail } from "./api";
+import { api, type Commit, type PublishStatus, type ReviewDetail } from "./api";
 import {
   CacheBadge,
   DiffView,
@@ -14,6 +14,7 @@ import {
   timeAgo,
   usePolling,
 } from "./components";
+import { useMe } from "./me";
 import { useReviewStream, type StreamPhase } from "./useReviewStream";
 
 export function RepoListPage() {
@@ -61,9 +62,28 @@ export function RepoListPage() {
   );
 }
 
+const PUBLISH_LABEL: Partial<Record<PublishStatus, string>> = {
+  publishing: "posting to GitHub",
+  published: "posted to GitHub",
+  failed: "GitHub post failed",
+};
+
+function PublishBadge({ status, skipped }: { status: PublishStatus; skipped: boolean }) {
+  const label = PUBLISH_LABEL[status];
+  if (!label || skipped) return null;
+  return <span className={`badge badge-publish-${status}`}>{label}</span>;
+}
+
+function unitUrl(githubUrl: string, fullName: string, commit: Commit): string {
+  return commit.kind === "pull_request"
+    ? `${githubUrl}/${fullName}/pull/${commit.pr_number}`
+    : `${githubUrl}/${fullName}/commit/${commit.sha}`;
+}
+
 export function RepoPage() {
   const { owner = "", name = "" } = useParams();
   const fullName = `${owner}/${name}`;
+  const githubUrl = useMe()?.github_web_url;
   const [olderPages, setOlderPages] = useState<Commit[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -110,12 +130,23 @@ export function RepoPage() {
           <li key={commit.id} className="commit">
             <div className="commit-head">
               <Sha sha={commit.sha} />
-              <span className="branch">{branchName(commit.ref)}</span>
+              {commit.kind === "pull_request" ? (
+                <span className="badge badge-pr">PR #{commit.pr_number}</span>
+              ) : (
+                <span className="branch">{branchName(commit.ref)}</span>
+              )}
               <span className="commit-message">{commit.message.split("\n")[0]}</span>
+              <PublishBadge status={commit.publish_status} skipped={!!commit.skip_reason} />
+              {githubUrl && (
+                <a className="muted small" href={unitUrl(githubUrl, fullName, commit)} target="_blank" rel="noreferrer">
+                  GitHub ↗
+                </a>
+              )}
               <span className="muted commit-when">
                 {commit.author ?? "unknown"} · {timeAgo(commit.created_at)}
               </span>
             </div>
+            {commit.skip_reason && <p className="muted small unit-note">Not reviewed separately: {commit.skip_reason}.</p>}
             <ul className="files">
               {commit.reviews.map((review) => (
                 <li key={review.id}>
@@ -129,7 +160,9 @@ export function RepoPage() {
                   </Link>
                 </li>
               ))}
-              {commit.reviews.length === 0 && <li className="muted file-row">Waiting for the worker…</li>}
+              {commit.reviews.length === 0 && !commit.skip_reason && (
+                <li className="muted file-row">Waiting for the worker…</li>
+              )}
             </ul>
           </li>
         ))}
@@ -182,7 +215,13 @@ export function ReviewPage() {
           <h1 className="file-title">{detail?.file_path ?? "…"}</h1>
           {detail && (
             <p className="muted">
-              <Sha sha={detail.commit_sha} /> on <span className="branch">{branchName(detail.ref)}</span> —{" "}
+              <Sha sha={detail.commit_sha} /> in{" "}
+              {detail.kind === "pull_request" ? (
+                <span className="badge badge-pr">PR #{detail.pr_number}</span>
+              ) : (
+                <span className="branch">{branchName(detail.ref)}</span>
+              )}{" "}
+              —{" "}
               {detail.commit_message.split("\n")[0]}
             </p>
           )}
