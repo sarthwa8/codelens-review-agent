@@ -249,7 +249,7 @@ def _generate(
         retrying = will_retry(exc, retries_used, settings)
         message = str(exc) or exc.__class__.__name__
         logger.warning("result %s failed (retrying=%s): %s", claim.result_id, retrying, message)
-        cache.fail(session, claim.result_id, message)
+        cache.fail(session, claim.result_id, message, final=not retrying)
         try:
             publisher.failed(message, retrying=retrying)
         except redis.RedisError:

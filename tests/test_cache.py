@@ -271,7 +271,8 @@ def test_failed_generation_is_never_cached(git_repo, deps) -> None:
         pipeline.review_file(review_id, flaky_deps, retries_used=0)
     review, result = load_review(deps.sessionmaker, review_id)
     assert result.status == ResultStatus.FAILED
-    assert review.status == ReviewStatus.FAILED
+    # A retry is coming, so the review isn't terminal (that would publish a false failure).
+    assert review.status == ReviewStatus.PENDING
     assert "partial output" not in result.review_text  # partial text was never persisted
 
     # Retry: the failed result is taken over and regenerated rather than served.
@@ -403,3 +404,11 @@ def test_repo_upsert_retries_after_a_non_arbiter_unique_violation(db) -> None:
         event.remove(engine, "before_cursor_execute", fail_first_repo_insert)
     assert raised, "the injected failure never fired"
     assert repo_id > 0
+
+
+def test_final_generation_failure_marks_reviews_failed(git_repo, deps) -> None:
+    [review_id] = make_push(git_repo, deps, "refs/heads/main", {"orders.py": ORDERS_V1})
+    with pytest.raises(LLMError):
+        pipeline.review_file(review_id, replace(deps, llm=FlakyLLM(failures=5)), retries_used=None)
+    review, result = load_review(deps.sessionmaker, review_id)
+    assert (review.status, result.status) == (ReviewStatus.FAILED, ResultStatus.FAILED)

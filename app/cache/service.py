@@ -173,7 +173,13 @@ def complete(
     session.commit()
 
 
-def fail(session: Session, result_id: int, error: str) -> None:
+def fail(session: Session, result_id: int, error: str, *, final: bool = True) -> None:
+    """Mark the result failed so the next attempt can take it over.
+
+    Attached reviews only become ``failed`` when no retry is coming. During a pending retry they go
+    back to ``pending``: a failed review is terminal, and a unit whose reviews are all terminal gets
+    published to GitHub, which would post a false failure while the retry is still queued.
+    """
     session.execute(
         update(ReviewResult)
         .where(ReviewResult.id == result_id)
@@ -182,7 +188,10 @@ def fail(session: Session, result_id: int, error: str) -> None:
     session.execute(
         update(Review)
         .where(Review.result_id == result_id, Review.status.not_in(ReviewStatus.TERMINAL))
-        .values(status=ReviewStatus.FAILED, error=error[:4000])
+        .values(
+            status=ReviewStatus.FAILED if final else ReviewStatus.PENDING,
+            error=error[:4000],
+        )
     )
     session.commit()
 
