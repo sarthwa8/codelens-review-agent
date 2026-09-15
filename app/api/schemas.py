@@ -38,6 +38,10 @@ class CommitOut(BaseModel):
     id: int
     sha: str
     ref: str
+    kind: str  # push | pull_request
+    pr_number: int | None
+    skip_reason: str | None
+    publish_status: str
     message: str
     author: str | None
     committed_at: datetime | None
@@ -61,6 +65,8 @@ class ResultOut(BaseModel):
 
 class ReviewDetail(ReviewSummary):
     repo_full_name: str
+    kind: str
+    pr_number: int | None
     commit_message: str
     patch: str | None
     content_hash: str | None

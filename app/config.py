@@ -85,8 +85,15 @@ class Settings(BaseSettings):
     stream_flush_interval_ms: int = 50
     sse_heartbeat_seconds: int = 15
 
-    # --- API ---
-    api_token: str | None = None
+    # --- API / auth ---
+    # "github": the dashboard and API require "Sign in with GitHub" and only show repositories the
+    # signed-in account can read on GitHub. "none": open access; only for local development.
+    auth_mode: Literal["none", "github"] = "none"
+    # Encrypts stored GitHub user tokens. Changing it signs everyone out.
+    session_secret: str = ""
+    session_ttl_seconds: int = 7 * 86_400
+    # How long a user's repo-access list is cached before GitHub is asked again.
+    access_cache_seconds: int = 300
     cors_origins: list[str] = Field(default_factory=lambda: ["http://localhost:5173"])
     delivery_dedupe_ttl_seconds: int = 86_400
 

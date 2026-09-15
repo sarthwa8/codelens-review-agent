@@ -23,8 +23,10 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
+from app.auth.deps import get_viewer
+from app.auth.sessions import Viewer
 from app.config import Settings, get_settings
-from app.db.models import ResultStatus, Review, ReviewResult, ReviewStatus
+from app.db.models import Repo, ResultStatus, Review, ReviewResult, ReviewStatus
 from app.db.session import get_sessionmaker
 from app.redis_client import get_async_redis
 from app.streaming.publisher import stream_key
@@ -46,18 +48,20 @@ class ReviewState:
     error: str | None
     latency_ms: int | None
     output_tokens: int | None
+    repo_github_id: int | None = None
 
 
 def load_review_state(review_id: int) -> ReviewState | None:
     with get_sessionmaker()() as session:
         row = session.execute(
-            select(Review, ReviewResult)
+            select(Review, ReviewResult, Repo.github_id)
+            .join(Repo, Review.repo_id == Repo.id)
             .outerjoin(ReviewResult, Review.result_id == ReviewResult.id)
             .where(Review.id == review_id)
         ).one_or_none()
     if row is None:
         return None
-    review, result = row
+    review, result, repo_github_id = row
     return ReviewState(
         status=review.status,
         result_id=review.result_id,
@@ -68,6 +72,7 @@ def load_review_state(review_id: int) -> ReviewState | None:
         error=review.error or (result.error if result else None),
         latency_ms=result.latency_ms if result else None,
         output_tokens=result.output_tokens if result else None,
+        repo_github_id=repo_github_id,
     )
 
 
@@ -171,8 +176,10 @@ async def stream_review(
     last_event_id: str | None = Header(default=None),
     redis: aioredis.Redis = Depends(get_async_redis),
     settings: Settings = Depends(get_settings),
+    viewer: Viewer = Depends(get_viewer),
 ) -> StreamingResponse:
-    if await run_in_threadpool(load_review_state, review_id) is None:
+    state = await run_in_threadpool(load_review_state, review_id)
+    if state is None or state.repo_github_id is None or not viewer.can_see(state.repo_github_id):
         raise HTTPException(status_code=404, detail="review not found")
     return StreamingResponse(
         review_events(review_id, request, redis, settings, last_event_id),

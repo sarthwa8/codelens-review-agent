@@ -1,12 +1,12 @@
 import logging
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from app.api.auth import require_token
 from app.api.routes import router as api_router
+from app.auth.routes import router as auth_router
 from app.config import Settings, get_settings
 from app.db.session import get_engine
 from app.redis_client import get_async_redis
@@ -21,6 +21,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     if not settings.github_webhook_secret:
         # Fail closed: without a secret anyone could trigger (paid) LLM reviews.
         raise RuntimeError("GITHUB_WEBHOOK_SECRET must be set")
+    if settings.auth_mode == "github":
+        missing = [
+            name
+            for name, value in (
+                ("GITHUB_APP_CLIENT_ID", settings.github_app_client_id),
+                ("GITHUB_APP_CLIENT_SECRET", settings.github_app_client_secret),
+            )
+            if not value
+        ]
+        if len(settings.session_secret) < 32:
+            missing.append("SESSION_SECRET (at least 32 characters)")
+        if missing:
+            raise RuntimeError(f"AUTH_MODE=github requires: {', '.join(missing)}")
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
@@ -33,11 +46,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=settings.cors_origins,
         allow_methods=["GET"],
-        allow_headers=["Authorization", "Last-Event-ID"],
+        allow_headers=["Last-Event-ID"],
     )
     app.include_router(webhook_router)
-    app.include_router(api_router, prefix="/api", dependencies=[Depends(require_token)])
-    app.include_router(sse_router, prefix="/api", dependencies=[Depends(require_token)])
+    app.include_router(auth_router)
+    app.include_router(api_router, prefix="/api")
+    app.include_router(sse_router, prefix="/api")
 
     @app.get("/healthz", tags=["ops"])
     def healthz() -> dict[str, str]:

@@ -131,17 +131,6 @@ def test_push_review_cache_and_api(git_repo, e2e) -> None:
     assert any("raise NotFound(order_id)" in h.text for h in hits)
 
 
-def test_api_token_is_enforced(e2e) -> None:
-    api = TestClient(create_app(e2e.settings.model_copy(update={"api_token": "s3cret"})))
-    assert api.get("/api/repos").status_code == 401
-    assert api.get("/api/repos", headers={"Authorization": "Bearer wrong"}).status_code == 401
-    assert api.get("/api/repos", headers={"Authorization": "Bearer s3cret"}).status_code == 200
-    assert (
-        api.get("/api/repos", params={"token": "s3cret"}).status_code == 200
-    )  # EventSource fallback
-    assert api.get("/healthz").status_code == 200  # health checks stay open
-
-
 def test_unknown_resources_404(e2e) -> None:
     api = TestClient(create_app(e2e.settings))
     assert api.get("/api/repos/nope/nope/reviews").status_code == 404
