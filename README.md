@@ -241,3 +241,12 @@ how a team works: squash-merge-only workflows produce fewer duplicates.
   could stay `streaming` forever. It now reads the result `FOR SHARE`.
 - **Cold-start first token:** the first review in each worker process loaded the ONNX embedding
   model inline (about 6 s before the first token). Workers now warm it up at process start.
+- **tree-sitter 0.26.0 memory corruption:** walking a large tree segfaulted workers during garbage
+  collection, and Python locals were overwritten with `Node` objects. It reproduces 3/3 on 0.26.0
+  and never on 0.25.2, so the dependency is pinned below 0.26 with a regression test.
+- **False failures published to GitHub:** a generation about to be retried marked its reviews
+  `failed`, which could publish a failing check run before the retry ran. Reviews now stay
+  `pending` while a retry is queued.
+- **Rate limits reported as final failures:** the retry decision was made before the error was
+  known, so a Groq 429 after three earlier retries told the browser "failed" despite 30 rate-limit
+  retries remaining. One shared `will_retry` rule now drives both the task and the stream.
