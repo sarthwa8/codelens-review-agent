@@ -59,6 +59,27 @@ class ReviewStatus:
     TERMINAL = (COMPLETE, FAILED, SKIPPED)
 
 
+class UnitKind:
+    """What a ``commits`` row represents: a pushed commit, or a pull request at its head SHA."""
+
+    PUSH = "push"
+    PULL_REQUEST = "pull_request"
+    ALL = (PUSH, PULL_REQUEST)
+
+
+class PublishStatus:
+    """Lifecycle of posting a unit's results back to GitHub (check run, PR review)."""
+
+    PENDING = "pending"
+    PUBLISHING = "publishing"
+    PUBLISHED = "published"
+    FAILED = "failed"
+    SKIPPED = (
+        "skipped"  # nothing to post: local source mode, no GitHub App, or push reviewed via its PR
+    )
+    ALL = (PENDING, PUBLISHING, PUBLISHED, FAILED, SKIPPED)
+
+
 def _check_in(column: str, values: tuple[str, ...]) -> str:
     return f"{column} IN ({', '.join(repr(v) for v in values)})"
 
@@ -73,6 +94,8 @@ class Repo(Base):
     # GitHub's numeric id is stable across renames/transfers; full_name is not.
     github_id: Mapped[int] = mapped_column(BigInteger, unique=True)
     full_name: Mapped[str] = mapped_column(String(255), unique=True)
+    # GitHub App installation that grants access; changes if the App is reinstalled.
+    installation_id: Mapped[int | None] = mapped_column(BigInteger)
     default_branch: Mapped[str] = mapped_column(String(255), default="main", server_default="main")
     index_status: Mapped[str] = mapped_column(
         String(16), default=IndexStatus.NONE, server_default=IndexStatus.NONE
@@ -92,13 +115,18 @@ class Repo(Base):
 
 
 class Commit(Base):
-    """A commit *as pushed to a ref*. The same SHA pushed to two branches is two rows, so the
-    audit trail records both pushes (and the second is typically served from cache)."""
+    """A review unit: a commit *as pushed to a ref*, or a pull request at its head SHA
+    (``ref = refs/pull/<n>/head``). The same SHA pushed to two branches is two rows, so the audit
+    trail records both pushes (and the second is typically served from cache)."""
 
     __tablename__ = "commits"
     __table_args__ = (
         UniqueConstraint("repo_id", "sha", "ref", name="uq_commits_repo_sha_ref"),
         Index("ix_commits_repo_id_id", "repo_id", "id"),
+        CheckConstraint(_check_in("kind", UnitKind.ALL), "ck_commits_kind"),
+        CheckConstraint(
+            _check_in("publish_status", PublishStatus.ALL), "ck_commits_publish_status"
+        ),
     )
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
@@ -109,6 +137,19 @@ class Commit(Base):
     author: Mapped[str | None] = mapped_column(String(255))
     committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     delivery_id: Mapped[str | None] = mapped_column(String(64))
+    kind: Mapped[str] = mapped_column(
+        String(16), default=UnitKind.PUSH, server_default=UnitKind.PUSH
+    )
+    pr_number: Mapped[int | None] = mapped_column(Integer)
+    base_sha: Mapped[str | None] = mapped_column(String(40))
+    # Set when the unit is deliberately not reviewed, e.g. "reviewed in pull request #12".
+    skip_reason: Mapped[str | None] = mapped_column(String(255))
+    publish_status: Mapped[str] = mapped_column(
+        String(16), default=PublishStatus.PENDING, server_default=PublishStatus.PENDING
+    )
+    check_run_id: Mapped[int | None] = mapped_column(BigInteger)
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    publish_error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     repo: Mapped[Repo] = relationship(back_populates="commits")
