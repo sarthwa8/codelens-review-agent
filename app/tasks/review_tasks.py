@@ -1,11 +1,12 @@
 """Celery tasks for the review flow.
 
-    process_push ─┬─▶ review_commit (per commit) ──▶ review_file (per changed file)
-                  ├─▶ index_repo   (first push: full default-branch index, own queue)
-                  └─▶ update_index (default-branch pushes only)
+    process_push ─────────┬─▶ review_commit (per review unit) ──▶ review_file (per changed file)
+    process_pull_request ─┤
+                          ├─▶ index_repo   (first event for a repo: full default-branch index)
+                          └─▶ update_index (default-branch pushes only)
 
-Fan-out keeps one slow/broken file from delaying or failing the rest of the push, and lets
-review_file retries be scoped to a single file.
+A *review unit* is a ``commits`` row: a pushed commit, or a pull request at its head SHA. Fan-out
+keeps one slow/broken file from delaying or failing the rest, and scopes retries to one file.
 """
 
 import logging
@@ -20,12 +21,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.celery_app import celery_app
-from app.db.models import Commit, IndexStatus, Repo, Review, ReviewStatus
+from app.db.models import Commit, IndexStatus, PublishStatus, Repo, Review, ReviewStatus, UnitKind
 from app.llm.adapter import LLMError
 from app.parsing.languages import detect_language, skip_reason_for_path
 from app.rag.embeddings import embedder_name
 from app.review import pipeline
-from app.sources.base import SourceError
+from app.review.pipeline import PipelineDeps
+from app.sources.base import CommitFile, SourceError
 from app.tasks.deps import get_pipeline_deps
 from app.tasks.index_tasks import index_repo, update_index
 
@@ -52,7 +54,9 @@ def _parse_timestamp(value: str | None) -> datetime | None:
         return None
 
 
-def upsert_repo(session: Session, repo_info: dict[str, Any]) -> int:
+def upsert_repo(
+    session: Session, repo_info: dict[str, Any], installation_id: int | None = None
+) -> int:
     """Insert or refresh a repository row, keyed by GitHub's stable numeric id.
 
     ``ON CONFLICT (github_id)`` only arbitrates that one constraint. Two things can still violate
@@ -64,6 +68,12 @@ def upsert_repo(session: Session, repo_info: dict[str, Any]) -> int:
     * a repo renamed away and a *different* repo later created under the old name — the stale row
       gives up the name (it keeps its history under a tombstoned name).
     """
+    refreshed: dict[str, Any] = {
+        "full_name": repo_info["full_name"],
+        "default_branch": repo_info["default_branch"],
+    }
+    if installation_id:
+        refreshed["installation_id"] = installation_id
     for attempt in range(1, REPO_UPSERT_ATTEMPTS + 1):
         try:
             session.execute(
@@ -76,18 +86,8 @@ def upsert_repo(session: Session, repo_info: dict[str, Any]) -> int:
             )
             repo_id = session.execute(
                 insert(Repo)
-                .values(
-                    github_id=repo_info["github_id"],
-                    full_name=repo_info["full_name"],
-                    default_branch=repo_info["default_branch"],
-                )
-                .on_conflict_do_update(
-                    index_elements=["github_id"],
-                    set_={
-                        "full_name": repo_info["full_name"],
-                        "default_branch": repo_info["default_branch"],
-                    },
-                )
+                .values(github_id=repo_info["github_id"], **refreshed)
+                .on_conflict_do_update(index_elements=["github_id"], set_=refreshed)
                 .returning(Repo.id)
             ).scalar_one()
             session.commit()
@@ -99,25 +99,71 @@ def upsert_repo(session: Session, repo_info: dict[str, Any]) -> int:
     raise AssertionError("unreachable")
 
 
+def _claim_indexing(session: Session, deps: PipelineDeps, repo_id: int) -> bool:
+    """Atomic check-and-set: concurrent events can't both start a full index."""
+    if deps.index is None:
+        return False
+    expected_model = embedder_name(deps.settings)
+    claimed = session.execute(
+        update(Repo)
+        .where(
+            Repo.id == repo_id,
+            or_(
+                Repo.index_status == IndexStatus.NONE,
+                # Back off after a failure so a broken repo isn't re-indexed on every push.
+                (Repo.index_status == IndexStatus.FAILED)
+                & (Repo.index_started_at < func.now() - INDEX_RETRY_AFTER_FAILURE),
+                (Repo.index_status == IndexStatus.READY) & (Repo.embedding_model != expected_model),
+                (Repo.index_status == IndexStatus.INDEXING)
+                & (Repo.index_started_at < func.now() - INDEX_STALE_AFTER),
+            ),
+        )
+        .values(index_status=IndexStatus.INDEXING, index_started_at=func.now(), index_error=None)
+        .returning(Repo.id)
+    ).scalar_one_or_none()
+    return claimed is not None
+
+
+def _open_pull_request(deps: PipelineDeps, full_name: str, ref: str) -> int | None:
+    if deps.settings.review_pushes_with_open_pr or not ref.startswith("refs/heads/"):
+        return None
+    try:
+        return deps.source.find_open_pull_request(full_name, ref.removeprefix("refs/heads/"))
+    except SourceError as exc:
+        # Reviewing the push anyway is the safe fallback: at worst the PR review is a cache hit.
+        logger.warning("open-PR lookup failed for %s %s: %s", full_name, ref, exc)
+        return None
+
+
 @celery_app.task(name="codelens.process_push", bind=True, max_retries=5)
 def process_push(self: Task, event: dict[str, Any]) -> dict[str, Any]:
     deps = get_pipeline_deps()
     repo_info = event["repo"]
-    with deps.sessionmaker() as session:
-        repo_id = upsert_repo(session, repo_info)
+    if deps.github is not None:
+        deps.github.remember_installation(repo_info["full_name"], event.get("installation_id"))
+    open_pr = _open_pull_request(deps, repo_info["full_name"], event["ref"])
+    skip_reason = f"reviewed in pull request #{open_pr}" if open_pr else None
 
+    with deps.sessionmaker() as session:
+        repo_id = upsert_repo(session, repo_info, event.get("installation_id"))
         commit_ids = []
         for commit in event["commits"]:
-            values = {
-                "repo_id": repo_id,
-                "sha": commit["sha"],
-                "ref": event["ref"],
-                "message": commit.get("message") or "",
-                "author": commit.get("author"),
-                "committed_at": _parse_timestamp(commit.get("timestamp")),
-                "delivery_id": event.get("delivery_id"),
-            }
-            session.execute(insert(Commit).values(**values).on_conflict_do_nothing())
+            session.execute(
+                insert(Commit)
+                .values(
+                    repo_id=repo_id,
+                    sha=commit["sha"],
+                    ref=event["ref"],
+                    kind=UnitKind.PUSH,
+                    message=commit.get("message") or "",
+                    author=commit.get("author"),
+                    committed_at=_parse_timestamp(commit.get("timestamp")),
+                    delivery_id=event.get("delivery_id"),
+                    skip_reason=skip_reason,
+                    publish_status=PublishStatus.SKIPPED if skip_reason else PublishStatus.PENDING,
+                )
+                .on_conflict_do_nothing()
+            )
             commit_ids.append(
                 session.execute(
                     select(Commit.id).where(
@@ -127,36 +173,7 @@ def process_push(self: Task, event: dict[str, Any]) -> dict[str, Any]:
                     )
                 ).scalar_one()
             )
-
-        start_index = False
-        if deps.index is not None:
-            expected_model = embedder_name(deps.settings)
-            # Atomic check-and-set: concurrent pushes can't both start a full index.
-            start_index = (
-                session.execute(
-                    update(Repo)
-                    .where(
-                        Repo.id == repo_id,
-                        or_(
-                            Repo.index_status == IndexStatus.NONE,
-                            # Back off after a failure so a broken repo isn't re-indexed on every push.
-                            (Repo.index_status == IndexStatus.FAILED)
-                            & (Repo.index_started_at < func.now() - INDEX_RETRY_AFTER_FAILURE),
-                            (Repo.index_status == IndexStatus.READY)
-                            & (Repo.embedding_model != expected_model),
-                            (Repo.index_status == IndexStatus.INDEXING)
-                            & (Repo.index_started_at < func.now() - INDEX_STALE_AFTER),
-                        ),
-                    )
-                    .values(
-                        index_status=IndexStatus.INDEXING,
-                        index_started_at=func.now(),
-                        index_error=None,
-                    )
-                    .returning(Repo.id)
-                ).scalar_one_or_none()
-                is not None
-            )
+        start_index = _claim_indexing(session, deps, repo_id)
         index_ready = session.execute(
             select(Repo.index_status).where(Repo.id == repo_id)
         ).scalar_one() == (IndexStatus.READY)
@@ -164,33 +181,89 @@ def process_push(self: Task, event: dict[str, Any]) -> dict[str, Any]:
 
     if start_index:
         index_repo.delay(repo_id)
-    for commit_id in commit_ids:
-        review_commit.delay(commit_id)
+    if not skip_reason:
+        for commit_id in commit_ids:
+            review_commit.delay(commit_id)
     is_default_branch = event["ref"] == f"refs/heads/{repo_info['default_branch']}"
     if is_default_branch and index_ready and event.get("after"):
         update_index.delay(repo_id, [c["sha"] for c in event["commits"]], event["after"])
-    return {"repo_id": repo_id, "commits": len(commit_ids), "index_started": start_index}
+    return {
+        "repo_id": repo_id,
+        "commits": len(commit_ids),
+        "index_started": start_index,
+        "skipped_for_pull_request": open_pr,
+    }
+
+
+@celery_app.task(name="codelens.process_pull_request", bind=True, max_retries=5)
+def process_pull_request(self: Task, event: dict[str, Any]) -> dict[str, Any]:
+    """One review unit per (PR, head SHA): redeliveries and reopen-with-same-head don't re-review."""
+    deps = get_pipeline_deps()
+    repo_info = event["repo"]
+    if deps.github is not None:
+        deps.github.remember_installation(repo_info["full_name"], event.get("installation_id"))
+    ref = f"refs/pull/{event['number']}/head"
+
+    with deps.sessionmaker() as session:
+        repo_id = upsert_repo(session, repo_info, event.get("installation_id"))
+        session.execute(
+            insert(Commit)
+            .values(
+                repo_id=repo_id,
+                sha=event["head_sha"],
+                ref=ref,
+                kind=UnitKind.PULL_REQUEST,
+                pr_number=event["number"],
+                base_sha=event["base_sha"],
+                message=event.get("title") or "",
+                author=event.get("author"),
+                delivery_id=event.get("delivery_id"),
+            )
+            .on_conflict_do_nothing()
+        )
+        commit_id = session.execute(
+            select(Commit.id).where(
+                Commit.repo_id == repo_id, Commit.sha == event["head_sha"], Commit.ref == ref
+            )
+        ).scalar_one()
+        start_index = _claim_indexing(session, deps, repo_id)
+        session.commit()
+
+    if start_index:
+        index_repo.delay(repo_id)
+    review_commit.delay(commit_id)
+    return {"repo_id": repo_id, "unit_id": commit_id, "pull_request": event["number"]}
+
+
+def _unit_files(deps: PipelineDeps, unit: Commit, full_name: str) -> list[CommitFile]:
+    if unit.kind == UnitKind.PULL_REQUEST:
+        assert unit.pr_number is not None and unit.base_sha is not None
+        return deps.source.get_pull_request_files(
+            full_name, unit.pr_number, unit.base_sha, unit.sha
+        )
+    return deps.source.get_commit_files(full_name, unit.sha)
 
 
 @celery_app.task(name="codelens.review_commit", bind=True, max_retries=5)
 def review_commit(self: Task, commit_id: int) -> dict[str, int]:
+    """Create one review row per changed file of a unit (push or PR) and fan out review_file."""
     deps = get_pipeline_deps()
     with deps.sessionmaker() as session:
         row = session.execute(
-            select(Commit.sha, Repo.full_name, Repo.id)
+            select(Commit, Repo.full_name, Repo.id)
             .join(Repo, Commit.repo_id == Repo.id)
             .where(Commit.id == commit_id)
         ).one_or_none()
     if row is None:
         return {"reviews": 0}
-    sha, full_name, repo_id = row
+    unit, full_name, repo_id = row
 
     try:
-        files = deps.source.get_commit_files(full_name, sha)
+        files = _unit_files(deps, unit, full_name)
     except SourceError as exc:
         if exc.retryable and self.request.retries < self.max_retries:
             raise self.retry(exc=exc, countdown=_backoff(self.request.retries, exc)) from exc
-        logger.error("giving up on commit %s: %s", sha, exc)
+        logger.error("giving up on unit %s (%s): %s", commit_id, unit.sha, exc)
         return {"reviews": 0}
 
     with deps.sessionmaker() as session:
@@ -204,7 +277,6 @@ def review_commit(self: Task, commit_id: int) -> dict[str, int]:
                 reason = "binary file, pure rename, or diff too large for GitHub"
             else:
                 reason = None
-            status = ReviewStatus.SKIPPED if reason else ReviewStatus.PENDING
             session.execute(
                 insert(Review)
                 .values(
@@ -214,7 +286,7 @@ def review_commit(self: Task, commit_id: int) -> dict[str, int]:
                     change_type=f.status,
                     language=detect_language(f.path),
                     patch=f.patch,
-                    status=status,
+                    status=ReviewStatus.SKIPPED if reason else ReviewStatus.PENDING,
                     skip_reason=reason,
                 )
                 .on_conflict_do_nothing(constraint="uq_reviews_commit_file")

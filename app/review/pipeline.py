@@ -11,7 +11,7 @@ Kept free of Celery so it can be tested directly with injected dependencies.
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import redis
 from sqlalchemy import select, update
@@ -30,6 +30,9 @@ from app.review.prompt import PROMPT_VERSION, PromptBudget, build_prompt
 from app.sources.base import SourceError, SourceProvider
 from app.streaming.publisher import StreamPublisher
 
+if TYPE_CHECKING:
+    from app.github.client import GitHubClient
+
 logger = logging.getLogger(__name__)
 
 LEASE_REFRESH_SECONDS = 30
@@ -44,6 +47,7 @@ class PipelineDeps:
     settings: Settings
     index: CodeIndex | None = None
     retriever: Retriever | None = None
+    github: "GitHubClient | None" = None  # set in GitHub source mode; also used to post results
 
 
 class Outcome:

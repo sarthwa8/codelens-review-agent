@@ -7,6 +7,7 @@ from celery.signals import worker_process_init
 
 from app.config import get_settings
 from app.db.session import get_sessionmaker
+from app.github.client import GitHubClient
 from app.llm import get_provider
 from app.rag.chroma_store import CodeIndex, chroma_client_factory
 from app.rag.embeddings import get_embedder
@@ -33,14 +34,16 @@ def get_pipeline_deps() -> PipelineDeps:
         if index
         else None
     )
+    github = GitHubClient(settings) if settings.source_mode == "github" else None
     return PipelineDeps(
         sessionmaker=get_sessionmaker(),
-        source=get_source(settings),
+        source=get_source(settings, github),
         llm=get_provider(settings),
         redis=get_sync_redis(),
         settings=settings,
         index=index,
         retriever=retriever,
+        github=github,
     )
 
 

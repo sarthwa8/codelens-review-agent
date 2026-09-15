@@ -76,6 +76,9 @@ class Settings(BaseSettings):
     task_max_retries: int = 3
     # Rate-limit waits (HTTP 429) are expected on free tiers and get a separate, larger budget.
     rate_limit_max_retries: int = 30
+    # A branch with an open pull request is reviewed through the PR (posted as a PR review);
+    # its individual pushes are recorded but not reviewed separately. Saves LLM quota.
+    review_pushes_with_open_pr: bool = False
 
     # --- Streaming ---
     stream_ttl_seconds: int = 3600
