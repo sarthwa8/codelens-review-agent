@@ -31,6 +31,16 @@ class SourceError(Exception):
 class SourceProvider(Protocol):
     def get_commit_files(self, full_name: str, sha: str) -> list[CommitFile]: ...
 
+    def get_pull_request_files(
+        self, full_name: str, number: int, base_sha: str, head_sha: str
+    ) -> list[CommitFile]:
+        """Files changed by a PR, with patches relative to the merge base (what GitHub shows)."""
+        ...
+
+    def find_open_pull_request(self, full_name: str, branch: str) -> int | None:
+        """Number of an open PR whose head is ``branch`` in this same repository, if any."""
+        ...
+
     def get_file_content(self, full_name: str, path: str, ref: str, max_bytes: int) -> str | None:
         """Decoded UTF-8 file content, or None if missing, binary, or larger than ``max_bytes``."""
         ...

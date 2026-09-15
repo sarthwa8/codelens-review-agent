@@ -2,7 +2,7 @@
 
 Maps ``owner/name`` to ``<LOCAL_REPOS_DIR>/owner/name`` and answers the same questions the
 GitHub API would, using ``git`` directly. Powers the offline demo, the replay benchmark, and
-end-to-end tests without network access.
+end-to-end tests without network access. Pull requests are modelled as ``base...head`` diffs.
 """
 
 import subprocess
@@ -41,21 +41,17 @@ class LocalGitSource:
             )
         return result.stdout
 
-    def get_commit_files(self, full_name: str, sha: str) -> list[CommitFile]:
-        # --root so the first commit of a repo also lists its files.
-        raw = self._git(
-            full_name, "diff-tree", "--root", "--no-commit-id", "-r", "-M", "--name-status", sha
-        )
+    def _files(self, full_name: str, name_status: bytes, patch_args: list[str]) -> list[CommitFile]:
         files = []
-        for line in raw.decode().splitlines():
+        for line in name_status.decode().splitlines():
             parts = line.split("\t")
             code = parts[0][0]
             path, previous = (parts[2], parts[1]) if code in "RC" else (parts[1], None)
             patch = None
             if code != "D":
-                diff = self._git(
-                    full_name, "show", "--format=", "--no-color", "-M", sha, "--", path
-                ).decode("utf-8", errors="replace")
+                diff = self._git(full_name, *patch_args, "--", path).decode(
+                    "utf-8", errors="replace"
+                )
                 # Match GitHub's API, whose "patch" field starts at the first hunk header.
                 start = diff.find("\n@@")
                 patch = diff[start + 1 :] if start != -1 else None
@@ -68,6 +64,24 @@ class LocalGitSource:
                 )
             )
         return files
+
+    def get_commit_files(self, full_name: str, sha: str) -> list[CommitFile]:
+        # --root so the first commit of a repo also lists its files.
+        names = self._git(
+            full_name, "diff-tree", "--root", "--no-commit-id", "-r", "-M", "--name-status", sha
+        )
+        return self._files(full_name, names, ["show", "--format=", "--no-color", "-M", sha])
+
+    def get_pull_request_files(
+        self, full_name: str, number: int, base_sha: str, head_sha: str
+    ) -> list[CommitFile]:
+        # Three dots: changes on head since it forked from base, exactly what a PR shows.
+        span = f"{base_sha}...{head_sha}"
+        names = self._git(full_name, "diff", "-M", "--name-status", span)
+        return self._files(full_name, names, ["diff", "--no-color", "-M", span])
+
+    def find_open_pull_request(self, full_name: str, branch: str) -> int | None:
+        return None  # local repositories have no pull requests
 
     def get_file_content(self, full_name: str, path: str, ref: str, max_bytes: int) -> str | None:
         try:
