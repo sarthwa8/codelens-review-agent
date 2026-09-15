@@ -271,3 +271,18 @@ def test_auth_mode_none_keeps_local_development_open(db, repos) -> None:
     assert api.get("/api/repos").status_code == 200
     assert api.get("/auth/me").json()["auth_mode"] == "none"
     assert api.get("/auth/login").status_code == 404
+
+
+def test_revocation_task_deletes_sessions_and_cached_access(
+    api, db, repos, deps, monkeypatch
+) -> None:
+    from app.tasks import auth_tasks
+
+    token = sign_in(api).cookies[SESSION_COOKIE]
+    monkeypatch.setattr(auth_tasks, "get_pipeline_deps", lambda: deps)
+    deps.redis.set(f"codelens:access:{session_id(token)}", "[1001]")
+
+    assert auth_tasks.revoke_user_sessions.run({"github_user_id": 4242}) == 1
+    assert deps.redis.get(f"codelens:access:{session_id(token)}") is None
+    with db() as session:
+        assert session.execute(select(UserSession)).first() is None

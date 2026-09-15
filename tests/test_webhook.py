@@ -231,3 +231,12 @@ def test_installation_events_need_no_work(client: TestClient, recorder: Recorder
     response = post(client, {"action": "created", "installation": {"id": 1}}, event="installation")
     assert response.json()["status"] == "ignored"
     assert recorder.events == []
+
+
+def test_revoked_app_authorization_ends_user_sessions(
+    client: TestClient, recorder: Recorder
+) -> None:
+    payload = {"action": "revoked", "sender": {"id": 4242, "login": "octodev"}}
+    response = post(client, payload, event="github_app_authorization")
+    assert response.json()["task"] == "codelens.revoke_user_sessions"
+    assert recorder.events == [{"github_user_id": 4242}]
