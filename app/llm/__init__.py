@@ -11,6 +11,15 @@ def get_provider(settings: Settings) -> LLMProvider:
         from app.llm.openai_provider import OpenAIProvider
 
         return OpenAIProvider(settings.openai_api_key, settings.openai_model)
+    if settings.llm_provider == "groq":
+        from app.llm.groq_provider import GroqProvider
+
+        return GroqProvider(
+            settings.groq_api_key,
+            settings.groq_model,
+            base_url=settings.groq_base_url,
+            reasoning_effort=settings.groq_reasoning_effort,
+        )
     if settings.llm_provider == "ollama":
         from app.llm.ollama_provider import OllamaProvider
 
