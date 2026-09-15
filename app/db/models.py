@@ -223,3 +223,38 @@ class Review(Base):
 
     commit: Mapped[Commit] = relationship(back_populates="reviews")
     result: Mapped[ReviewResult | None] = relationship()
+
+
+class User(Base):
+    """A person who signed in with GitHub. Access to repos is always re-derived from GitHub."""
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    github_id: Mapped[int] = mapped_column(BigInteger, unique=True)
+    login: Mapped[str] = mapped_column(String(255))
+    name: Mapped[str | None] = mapped_column(String(255))
+    avatar_url: Mapped[str | None] = mapped_column(String(1024))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_login_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class UserSession(Base):
+    """Server-side session. ``id`` is the SHA-256 of the cookie value, so a database leak doesn't
+    yield usable sessions; GitHub user tokens are stored encrypted (see app.auth.crypto)."""
+
+    __tablename__ = "user_sessions"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    access_token_encrypted: Mapped[str] = mapped_column(Text)
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(Text)
+    access_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

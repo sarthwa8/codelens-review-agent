@@ -63,7 +63,10 @@ def database_url() -> str:
 def db(database_url: str) -> sessionmaker[Session]:
     with get_engine().begin() as connection:
         connection.execute(
-            text("TRUNCATE reviews, review_results, commits, repos RESTART IDENTITY CASCADE")
+            text(
+                "TRUNCATE user_sessions, users, reviews, review_results, commits, repos"
+                " RESTART IDENTITY CASCADE"
+            )
         )
     return get_sessionmaker()
 
