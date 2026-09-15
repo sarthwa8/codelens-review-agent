@@ -240,12 +240,17 @@ def review_commit(self: Task, commit_id: int) -> dict[str, int]:
 @celery_app.task(name="codelens.review_file", bind=True, max_retries=3)
 def review_file(self: Task, review_id: int) -> str:
     deps = get_pipeline_deps()
-    final_attempt = self.request.retries >= self.max_retries
+    retries = self.request.retries
     try:
-        return pipeline.review_file(review_id, deps, final_attempt=final_attempt)
+        return pipeline.review_file(review_id, deps, retries_used=retries)
     except (LLMError, SourceError) as exc:
-        if exc.retryable and not final_attempt:
-            raise self.retry(exc=exc, countdown=_backoff(self.request.retries, exc)) from exc
+        if pipeline.will_retry(exc, retries, deps.settings):
+            limit = (
+                deps.settings.rate_limit_max_retries
+                if getattr(exc, "rate_limited", False)
+                else deps.settings.task_max_retries
+            )
+            raise self.retry(exc=exc, countdown=_backoff(retries, exc), max_retries=limit) from exc
         pipeline.mark_review_failed(deps.sessionmaker, review_id, str(exc))
         logger.error("review %s failed permanently: %s", review_id, exc)
         return "failed"

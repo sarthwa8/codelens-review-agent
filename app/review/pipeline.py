@@ -76,7 +76,23 @@ def mark_review_failed(session_factory: sessionmaker[Session], review_id: int, e
         session.commit()
 
 
-def review_file(review_id: int, deps: PipelineDeps, *, final_attempt: bool = True) -> str:
+def will_retry(exc: BaseException, retries_used: int | None, settings: Settings) -> bool:
+    """Single retry rule shared by the pipeline (what to tell the browser) and the Celery task.
+
+    ``retries_used=None`` means the caller cannot retry. Rate-limit waits (HTTP 429 on free tiers)
+    are expected and get their own larger budget, so they don't burn the error-retry budget.
+    """
+    if retries_used is None or not getattr(exc, "retryable", False):
+        return False
+    limit = (
+        settings.rate_limit_max_retries
+        if getattr(exc, "rate_limited", False)
+        else settings.task_max_retries
+    )
+    return retries_used < limit
+
+
+def review_file(review_id: int, deps: PipelineDeps, *, retries_used: int | None = None) -> str:
     settings = deps.settings
     with deps.sessionmaker() as session:
         row = session.execute(
@@ -146,7 +162,7 @@ def review_file(review_id: int, deps: PipelineDeps, *, final_attempt: bool = Tru
             content=content,
             patch=patch,
             commit_message=commit.message,
-            final_attempt=final_attempt,
+            retries_used=retries_used,
         )
         return Outcome.GENERATED
 
@@ -162,7 +178,7 @@ def _generate(
     content: str,
     patch: str,
     commit_message: str,
-    final_attempt: bool,
+    retries_used: int | None,
 ) -> None:
     settings = deps.settings
     publisher = StreamPublisher(
@@ -187,14 +203,14 @@ def _generate(
             patch=patch,
             changed_chunks=chunks,
             similar=similar,
-            budget=PromptBudget(settings.max_prompt_chars),
+            budget=PromptBudget(settings.effective_max_prompt_chars),
         )
 
         parts: list[str] = []
         usage = Usage(None, None)
         last_lease = time.monotonic()
         request = LLMRequest(
-            system=prompt.system, user=prompt.user, max_tokens=settings.llm_max_output_tokens
+            system=prompt.system, user=prompt.user, max_tokens=settings.effective_max_output_tokens
         )
         for event in deps.llm.stream(request):
             if isinstance(event, TextDelta):
@@ -226,7 +242,7 @@ def _generate(
         publisher.done(latency_ms=latency_ms, output_tokens=usage.output_tokens, cache_hit=False)
     except Exception as exc:
         session.rollback()
-        retrying = bool(getattr(exc, "retryable", False)) and not final_attempt
+        retrying = will_retry(exc, retries_used, settings)
         message = str(exc) or exc.__class__.__name__
         logger.warning("result %s failed (retrying=%s): %s", claim.result_id, retrying, message)
         cache.fail(session, claim.result_id, message)

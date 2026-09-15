@@ -268,7 +268,7 @@ def test_failed_generation_is_never_cached(git_repo, deps) -> None:
     flaky_deps = replace(deps, llm=flaky)
 
     with pytest.raises(LLMError):
-        pipeline.review_file(review_id, flaky_deps, final_attempt=False)
+        pipeline.review_file(review_id, flaky_deps, retries_used=0)
     review, result = load_review(deps.sessionmaker, review_id)
     assert result.status == ResultStatus.FAILED
     assert review.status == ReviewStatus.FAILED
