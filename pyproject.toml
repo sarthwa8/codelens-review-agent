@@ -20,7 +20,8 @@ dependencies = [
   "psycopg[binary]>=3.3,<4",
   "httpx>=0.28,<1",
   "chromadb>=1.5.9,<1.6",
-  "tree-sitter>=0.26,<0.27",
+  # 0.26.0 corrupts memory when walking large trees (segfault under GC); stay on 0.25 until fixed.
+  "tree-sitter>=0.25.2,<0.26",
   "tree-sitter-language-pack>=1.19,<2",
   "anthropic>=1.5,<2",
   "openai>=3.13,<4",

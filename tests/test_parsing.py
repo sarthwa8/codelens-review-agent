@@ -133,3 +133,16 @@ def test_windows_are_clipped_around_units_instead_of_overlapping_them() -> None:
 
 def test_whitespace_only_change_yields_no_chunks() -> None:
     assert extract_changed_chunks("m.py", "a = 1\n\n", "@@ -1,1 +1,2 @@\n a = 1\n+\n") == []
+
+
+def test_large_file_extraction_survives_garbage_collection() -> None:
+    """Regression: tree-sitter 0.26.0 corrupted memory on large trees and segfaulted during GC."""
+    import gc
+
+    source = "\n".join(f"def f{i}(x):\n    return x + {i}\n" for i in range(600))
+    patch = "@@ -0,0 +1,1800 @@\n" + "\n".join("+" + line for line in source.splitlines())
+    for _ in range(3):
+        chunks = extract_changed_chunks("big.py", source, patch)
+        gc.collect()
+    assert len(chunks) == 600
+    assert {c.name for c in chunks} == {f"f{i}" for i in range(600)}
