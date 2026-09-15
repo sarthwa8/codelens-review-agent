@@ -8,6 +8,6 @@ export default defineConfig({
   server: {
     port: 5173,
     // Same-origin in development too, so EventSource and fetch need no CORS.
-    proxy: { "/api": api, "/webhooks": api },
+    proxy: { "/api": api, "/auth": api, "/webhooks": api },
   },
 });
