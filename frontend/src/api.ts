@@ -26,10 +26,16 @@ export interface ReviewSummary {
   ref: string;
 }
 
+export type PublishStatus = "pending" | "publishing" | "published" | "failed" | "skipped";
+
 export interface Commit {
   id: number;
   sha: string;
   ref: string;
+  kind: "push" | "pull_request";
+  pr_number: number | null;
+  skip_reason: string | null;
+  publish_status: PublishStatus;
   message: string;
   author: string | null;
   committed_at: string | null;
@@ -58,6 +64,8 @@ export interface ReviewResult {
 
 export interface ReviewDetail extends ReviewSummary {
   repo_full_name: string;
+  kind: "push" | "pull_request";
+  pr_number: number | null;
   commit_message: string;
   patch: string | null;
   content_hash: string | null;
@@ -82,27 +90,31 @@ export interface Stats {
   generation_ms_saved: number;
 }
 
-// Optional API token: open the UI once with ?token=... and it is remembered for this browser.
-const TOKEN_KEY = "codelens_token";
-function readToken(): string | null {
-  try {
-    const fromUrl = new URLSearchParams(window.location.search).get("token");
-    if (fromUrl) localStorage.setItem(TOKEN_KEY, fromUrl);
-    return fromUrl ?? localStorage.getItem(TOKEN_KEY);
-  } catch {
-    return null;
-  }
+export interface Me {
+  auth_mode: "none" | "github";
+  authenticated: boolean;
+  login: string | null;
+  avatar_url: string | null;
+  install_url: string | null;
+  github_web_url: string;
 }
-const token = readToken();
+
+export function signInUrl(): string {
+  const next = window.location.pathname + window.location.search;
+  return `/auth/login?next=${encodeURIComponent(next)}`;
+}
 
 async function get<T>(path: string, params?: Record<string, string | number | boolean | undefined>): Promise<T> {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(params ?? {})) {
     if (value !== undefined) query.set(key, String(value));
   }
-  const response = await fetch(`/api${path}${query.size ? `?${query}` : ""}`, {
-    headers: token ? { Authorization: `Bearer ${token}` } : {},
-  });
+  // Same-origin requests carry the HttpOnly session cookie automatically.
+  const response = await fetch(`/api${path}${query.size ? `?${query}` : ""}`);
+  if (response.status === 401) {
+    window.location.assign(signInUrl());
+    throw new Error("Signing in…");
+  }
   if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
   return response.json() as Promise<T>;
 }
@@ -113,5 +125,7 @@ export const api = {
     get<Page<Commit>>(`/repos/${repo}/commits`, { limit: 15, before_id: beforeId }),
   review: (id: number) => get<ReviewDetail>(`/reviews/${id}`),
   stats: (repo?: string) => get<Stats>("/stats", { repo }),
-  streamUrl: (id: number) => `/api/reviews/${id}/stream${token ? `?token=${encodeURIComponent(token)}` : ""}`,
+  me: () => fetch("/auth/me").then((r) => r.json() as Promise<Me>),
+  // EventSource sends same-origin cookies, so the stream is authorized like any other request.
+  streamUrl: (id: number) => `/api/reviews/${id}/stream`,
 };

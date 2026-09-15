@@ -64,7 +64,7 @@ h1 { font-size: 22px; }
 .notice { color: var(--warn); background: var(--warn-bg); padding: 8px 12px; border-radius: 8px; }
 
 .topbar {
-  display: flex; align-items: baseline; gap: 14px;
+  display: flex; align-items: center; gap: 14px;
   padding: 14px 28px; border-bottom: 1px solid var(--border); background: var(--surface);
   position: sticky; top: 0; z-index: 10;
 }
@@ -173,3 +173,20 @@ a.file-row:hover { background: var(--surface-2); }
 .diff-add { background: var(--add-bg); }
 .diff-del { background: var(--del-bg); }
 .diff-hunk { color: var(--hunk); }
+
+/* sign-in */
+.tagline { flex: 1; }
+.user { display: inline-flex; align-items: center; gap: 10px; }
+.avatar { width: 22px; height: 22px; border-radius: 50%; }
+.button { display: inline-block; background: var(--text); color: var(--bg); border-radius: 8px; padding: 6px 12px; font-weight: 600; font-size: 13px; }
+.empty .button { margin-top: 10px; }
+.link-button { background: none; border: 0; color: var(--muted); cursor: pointer; font: inherit; font-size: 12px; padding: 0; }
+.link-button:hover { color: var(--accent); }
+.user form { margin: 0; }
+
+/* pull requests + publishing */
+.badge-pr { background: var(--cache-bg); color: var(--cache); text-transform: none; }
+.badge-publish-published { background: var(--ok-bg); color: var(--ok); text-transform: none; }
+.badge-publish-publishing { background: var(--warn-bg); color: var(--warn); text-transform: none; }
+.badge-publish-failed { background: var(--bad-bg); color: var(--bad); text-transform: none; }
+.unit-note { margin: 0; padding: 8px 14px; border-bottom: 1px solid var(--border); }
