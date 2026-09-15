@@ -132,6 +132,10 @@ def prepare_task(
             # Drafts are reviewed once marked ready (ready_for_review), which saves LLM quota.
             raise Ignored("draft pull request")
         return "codelens.process_pull_request", build_pull_request_event(payload, delivery_id)
+    if event_name == "github_app_authorization":
+        if payload.get("action") != "revoked":
+            raise Ignored("authorization change needs no action")
+        return "codelens.revoke_user_sessions", {"github_user_id": int(payload["sender"]["id"])}
     raise Ignored(f"event '{event_name}' is not handled")
 
 
@@ -165,7 +169,7 @@ async def github_webhook(
 
     if x_github_event == "ping":
         return JSONResponse({"status": "pong"}, status_code=200)
-    if x_github_event not in ("push", "pull_request"):
+    if x_github_event not in ("push", "pull_request", "github_app_authorization"):
         return _ignored(f"event '{x_github_event}' is not handled")
 
     try:
@@ -207,6 +211,6 @@ async def github_webhook(
     }
     if "commits" in event:
         response["commits"] = len(event["commits"])
-    else:
+    elif "number" in event:
         response["pull_request"] = event["number"]
     return response

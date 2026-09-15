@@ -8,7 +8,12 @@ celery_app = Celery(
     "codelens",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.review_tasks", "app.tasks.index_tasks", "app.tasks.publish_tasks"],
+    include=[
+        "app.tasks.review_tasks",
+        "app.tasks.index_tasks",
+        "app.tasks.publish_tasks",
+        "app.tasks.auth_tasks",
+    ],
 )
 
 celery_app.conf.update(
