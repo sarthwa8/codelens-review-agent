@@ -24,6 +24,7 @@ dependencies = [
   "tree-sitter-language-pack>=1.19,<2",
   "anthropic>=1.5,<2",
   "openai>=3.13,<4",
+  "pyjwt[crypto]>=2.14,<3",
 ]
 
 [project.optional-dependencies]
