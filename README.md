@@ -1,67 +1,108 @@
 # CodeLens
 
-Real-time, repo-aware LLM code review for GitHub pushes.
+Real-time, repo-aware LLM code review for GitHub pushes and pull requests.
 
-A push webhook is acknowledged in milliseconds. A Celery worker then parses each changed file with
+CodeLens runs as a **GitHub App**. When code is pushed or a pull request is opened or updated, the
+webhook is acknowledged in milliseconds. A Celery worker then parses each changed file with
 **tree-sitter**, retrieves similar code from the **same repository** out of **ChromaDB**, asks an
-LLM (Anthropic, OpenAI, Ollama, or an offline fake) for a review, and streams it **token by token**
-to a React dashboard over **Server-Sent Events**. Every review is persisted in **PostgreSQL**. A
-**content-hash cache** skips the LLM entirely when identical code shows up again, as it does after
-fast-forward merges, cherry-picks, rebases, and revert/re-apply.
+LLM (**Groq** free tier, Anthropic, OpenAI, Ollama, or an offline fake) for a review, and streams
+it **token by token** to a React dashboard over **Server-Sent Events**.
+
+Results go back to GitHub as a **check run** with line annotations and, for pull requests, a
+**PR review** with inline comments. People **sign in with GitHub** and only see repositories their
+account can read. Every review is kept in **PostgreSQL**, and a **content-hash cache** skips the
+LLM entirely when identical code shows up again (fast-forward merges, cherry-picks, rebases,
+revert/re-apply).
 
 ```
-GitHub ──push──▶ FastAPI /webhooks/github ── verify HMAC · dedupe delivery · enqueue · 202
-                        │
-                        ▼ Redis (Celery broker)
-                 Celery worker
-                   ├─ fetch commit files + full file contents (GitHub API or local git)
-                   ├─ tree-sitter: changed lines → enclosing functions / classes
-                   ├─ ChromaDB: similar code elsewhere in the repo (default-branch index)
-                   ├─ cache key → Postgres claim ──hit──▶ reuse result (no LLM call)
-                   ├─ LLM adapter (anthropic | openai | ollama | fake), streamed
-                   └─ XADD tokens → Redis Stream per result
-Browser ──SSE /api/reviews/{id}/stream──▶ FastAPI ── XREAD (replay + tail) ──▶ Redis Stream
-        ──REST /api/repos/{owner}/{name}/reviews, /api/stats ─────────────────▶ PostgreSQL
+GitHub ──push / pull_request──▶ FastAPI /webhooks/github ── verify HMAC · dedupe · enqueue · 202
+                                       │
+                                       ▼ Redis (Celery broker)
+                                Celery worker
+                                  ├─ branch has an open PR? review the PR instead of the push
+                                  ├─ GitHub App installation token → changed files + contents
+                                  ├─ tree-sitter: changed lines → enclosing functions / classes
+                                  ├─ ChromaDB: similar code elsewhere in the repo
+                                  ├─ cache key → Postgres claim ──hit──▶ reuse result (no LLM call)
+                                  ├─ LLM (groq | anthropic | openai | ollama | fake), streamed
+                                  ├─ tokens → Redis Stream per result
+                                  └─ all files done → check run + PR review on GitHub
+Browser ──sign in with GitHub──▶ /auth/* (PKCE, HttpOnly session cookie)
+        ──SSE /api/reviews/{id}/stream──▶ FastAPI ── XREAD (replay + tail) ──▶ Redis Stream
+        ──REST /api/...  (only repos the signed-in user can read) ───────────▶ PostgreSQL
 ```
 
-## Quick start
+## Run it
+
+You need Docker, a free [Groq API key](https://console.groq.com/keys), and a GitHub account.
+
+**1. Configure.**
 
 ```bash
 cp .env.example .env
-docker compose up --build
 ```
 
-| Service | URL |
+Put your Groq key in `GROQ_API_KEY`, and a random value in `SESSION_SECRET`:
+
+```bash
+openssl rand -hex 32
+```
+
+**2. Get a public webhook URL (local development).** GitHub must be able to reach your webhook. Open
+https://smee.io, click **Start a new channel**, and keep the channel URL for the next step.
+
+**3. Create the GitHub App.** Go to GitHub → Settings → Developer settings → GitHub Apps →
+**New GitHub App**:
+
+| Field | Value |
 |---|---|
-| Dashboard | http://localhost:3000 |
-| API + OpenAPI docs | http://localhost:8000/docs |
-| Webhook endpoint | `POST http://localhost:8000/webhooks/github` |
+| Homepage URL | `http://localhost:3000` |
+| Callback URL | `http://localhost:3000/auth/callback` |
+| Expire user authorization tokens | on (default) |
+| Webhook URL | your smee channel URL (later: `https://<your-domain>/webhooks/github`) |
+| Webhook secret | any random string, also put it in `GITHUB_WEBHOOK_SECRET` |
+| Repository permissions | **Checks**: read & write · **Contents**: read-only · **Pull requests**: read & write · Metadata: read-only |
+| Subscribe to events | **Push**, **Pull request** |
 
-Postgres, Redis, ChromaDB, migrations, the API, the Celery worker and the frontend all start from
-that one command, with health-checked startup ordering.
+After creating it, copy the **App ID**, **Client ID** and the app's URL name (slug) into `.env`,
+generate a **client secret** (`GITHUB_APP_CLIENT_SECRET`), and **generate a private key**. Save the
+downloaded file as `secrets/github-app.pem`, which git ignores.
 
-### Try it without GitHub
+**4. Install the App** on the repositories you want reviewed (App page → **Install App**).
 
-The stack can read commits from local git repositories in `./.demo-repos/<owner>/<name>`:
-
-```bash
-SOURCE_MODE=local docker compose up -d --build
-python scripts/replay_benchmark.py          # builds a demo repo, replays 14 pushes, prints cache stats
-```
-
-Or send a signed webhook for your own local repository:
+**5. Start everything.**
 
 ```bash
-python scripts/send_webhook.py <owner>/<name> --commits 3
+docker compose up -d --build
 ```
 
-### Connect a real repository
+Then forward webhooks from smee to CodeLens (leave this running):
 
-1. Set `GITHUB_WEBHOOK_SECRET`, `GITHUB_TOKEN` (needed for private repos and rate limits) and an LLM
-   provider in `.env`, for example `LLM_PROVIDER=anthropic` with `ANTHROPIC_API_KEY`.
-2. Expose port 8000 (for example with `gh webhook forward`, `ngrok`, or a real deployment).
-3. In the repository, add a webhook: payload URL `…/webhooks/github`, content type `application/json`,
-   the same secret, and the **push** event.
+```bash
+npx smee-client --url <your-smee-channel-url> --target http://localhost:8000/webhooks/github
+```
+
+**6. Use it.** Open http://localhost:3000, sign in with GitHub, and push a commit or open a pull
+request in an installed repository. The review streams into the dashboard, and the check run and
+PR review appear on GitHub when it finishes.
+
+On Groq's free tier (8K tokens per minute), large pushes are reviewed file by file as the rate
+limit allows. CodeLens waits for `retry-after` automatically.
+
+### Try it offline (no GitHub, no API key)
+
+```bash
+printf 'SOURCE_MODE=local\nLLM_PROVIDER=fake\nAUTH_MODE=none\nFAKE_LLM_DELAY_MS=40\n' > .env
+docker compose up -d --build
+python scripts/replay_benchmark.py     # builds a demo repo, replays 14 pushes, prints cache stats
+```
+
+### Make it live
+
+Run the same `docker compose` stack on a server with a domain and HTTPS in front of port 3000. Set
+`PUBLIC_URL=https://<your-domain>`, change the App's callback URL to
+`https://<your-domain>/auth/callback` and its webhook URL to `https://<your-domain>/webhooks/github`,
+then drop smee. Don't expose the Postgres, Redis or Chroma ports publicly.
 
 ## Design decisions and flaws fixed from the original spec
 
@@ -91,20 +132,25 @@ python scripts/send_webhook.py <owner>/<name> --commits 3
 app/
   main.py                 app factory, health checks, router wiring
   config.py               settings (env / .env)
-  webhooks/github.py      HMAC verification, dedupe, enqueue
+  webhooks/github.py      HMAC verification, dedupe, routing of push / pull_request / revocation events
   celery_app.py           broker config: acks_late, separate index queue
-  tasks/                  process_push → review_commit → review_file; index_repo, update_index
+  tasks/                  process_push / process_pull_request → review_commit → review_file;
+                          publish_unit; index_repo, update_index; revoke_user_sessions
   review/pipeline.py      per-file orchestration (cache claim → parse → RAG → LLM → stream)
   review/prompt.py        prompt construction, budgets, injection fencing
   review/redact.py        secret redaction
+  review/findings.py      parse model findings (severity, path:line, message)
+  review/report.py        check-run and PR-review reports, inline-comment placement, sanitization
   cache/keys.py           cache-key definition (design notes inline)
   cache/service.py        claim / follow / complete / fail with row-level locking
   parsing/                unified-diff parsing, tree-sitter unit extraction, language rules
   rag/                    embeddings, Chroma store, retriever
-  llm/                    provider adapter interface plus anthropic/openai/ollama/fake
+  llm/                    provider adapter interface plus groq/anthropic/openai/ollama/fake
+  github/                 App JWT + installation tokens, REST client, check-run/PR-review publisher
+  auth/                   sign in with GitHub: OAuth + PKCE, sessions, repo-scoped viewer
   sources/                GitHub REST API and local-git source providers
   streaming/              Redis Streams publisher, SSE endpoint
-  api/                    REST history API, stats, token auth
+  api/                    REST history API and stats, scoped to the signed-in viewer
   db/                     SQLAlchemy models and session
 alembic/                  migrations
 frontend/                 React + Vite dashboard (nginx image proxies /api with SSE settings)
@@ -116,16 +162,20 @@ tests/                    webhook, cache, parsing, RAG/prompt, streaming, end-to
 
 | Method | Path | Description |
 |---|---|---|
-| `POST` | `/webhooks/github` | GitHub push webhook (HMAC-verified) |
+| `POST` | `/webhooks/github` | GitHub App webhook: `push`, `pull_request`, `github_app_authorization` (HMAC-verified) |
+| `GET` | `/auth/login`, `/auth/callback` | Sign in with GitHub (OAuth web flow + PKCE) |
+| `POST` | `/auth/logout` | End the session |
+| `GET` | `/auth/me` | Current user, auth mode, App install link |
 | `GET` | `/api/repos` | Onboarded repositories with index status and activity |
-| `GET` | `/api/repos/{owner}/{name}/commits` | Commits (per ref) with their file reviews, cursor-paginated |
+| `GET` | `/api/repos/{owner}/{name}/commits` | Review units (pushed commits and PRs) with their file reviews and GitHub publish status, cursor-paginated |
 | `GET` | `/api/repos/{owner}/{name}/reviews` | Full review history. Filters: `commit_sha`, `status`, `cache_hit`, `file_path`, `before_id` |
 | `GET` | `/api/reviews/{id}` | Review text, diff, and audit metadata (model, tokens, latency, RAG sources) |
 | `GET` | `/api/reviews/{id}/stream` | SSE: `reset`, `status`, `delta`, `snapshot`, `retrying`, `skipped`, `done`, `failed` |
 | `GET` | `/api/stats?repo=owner/name` | LLM calls, cache hits, hit rate, tokens and time saved |
 | `GET` | `/healthz`, `/readyz` | Liveness, and readiness (Postgres + Redis) |
 
-Set `API_TOKEN` to require `Authorization: Bearer <token>` (SSE also accepts `?token=`).
+With `AUTH_MODE=github`, every `/api` route (including the SSE stream) requires a session and only
+returns repositories the user can read on GitHub. Other repositories answer 404.
 
 ## Development
 
