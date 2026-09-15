@@ -4,21 +4,13 @@ push to feature branch → index repo → review files (RAG from the index) → 
 main → cache hits → incremental index update → history + stats + SSE via the API.
 """
 
-from dataclasses import replace
-
-import chromadb
-import pytest
 from fastapi.testclient import TestClient
 
-from app.celery_app import celery_app
 from app.db.models import IndexStatus, Repo, ReviewStatus
 from app.llm.fake_provider import FakeProvider
 from app.main import create_app
 from app.parsing.treesitter import extract_index_chunks
-from app.rag.chroma_store import CodeIndex
-from app.rag.embeddings import HashingEmbedder
-from app.rag.retriever import Retriever
-from app.tasks import index_tasks, review_tasks
+from app.tasks import review_tasks
 
 USERS = """from db import session
 
@@ -41,25 +33,6 @@ ORDERS_FIXED = ORDERS.replace(
     "    return session.get(Order, order_id)\n",
     "    order = session.get(Order, order_id)\n    if order is None:\n        raise NotFound(order_id)\n    return order\n",
 )
-
-
-@pytest.fixture
-def e2e(deps, monkeypatch):
-    client = chromadb.EphemeralClient()
-    for collection in client.list_collections():
-        client.delete_collection(collection.name)
-    index = CodeIndex(lambda: client, HashingEmbedder())
-    full = replace(
-        deps,
-        index=index,
-        retriever=Retriever(index, top_k=3, max_distance=0.9, max_queries=4),
-        settings=deps.settings.model_copy(update={"embedding_provider": "hashing"}),
-    )
-    monkeypatch.setattr(review_tasks, "get_pipeline_deps", lambda: full)
-    monkeypatch.setattr(index_tasks, "get_pipeline_deps", lambda: full)
-    monkeypatch.setattr(celery_app.conf, "task_always_eager", True)
-    monkeypatch.setattr(celery_app.conf, "task_eager_propagates", True)
-    return full
 
 
 def push_event(git_repo, shas: list[str], ref: str, before: str | None = None) -> dict:

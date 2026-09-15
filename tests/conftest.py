@@ -146,3 +146,33 @@ def deps(
         redis=sync_redis,
         settings=settings,
     )
+
+
+@pytest.fixture
+def e2e(deps: PipelineDeps, monkeypatch: pytest.MonkeyPatch) -> PipelineDeps:
+    """Run Celery tasks eagerly with an in-memory vector index and the offline fake LLM."""
+    from dataclasses import replace
+
+    import chromadb
+
+    from app.celery_app import celery_app
+    from app.rag.chroma_store import CodeIndex
+    from app.rag.embeddings import HashingEmbedder
+    from app.rag.retriever import Retriever
+    from app.tasks import index_tasks, review_tasks
+
+    client = chromadb.EphemeralClient()
+    for collection in client.list_collections():
+        client.delete_collection(collection.name)
+    index = CodeIndex(lambda: client, HashingEmbedder())
+    full = replace(
+        deps,
+        index=index,
+        retriever=Retriever(index, top_k=3, max_distance=0.9, max_queries=4),
+        settings=deps.settings.model_copy(update={"embedding_provider": "hashing"}),
+    )
+    monkeypatch.setattr(review_tasks, "get_pipeline_deps", lambda: full)
+    monkeypatch.setattr(index_tasks, "get_pipeline_deps", lambda: full)
+    monkeypatch.setattr(celery_app.conf, "task_always_eager", True)
+    monkeypatch.setattr(celery_app.conf, "task_eager_propagates", True)
+    return full
