@@ -31,9 +31,20 @@ LLMEvent = TextDelta | Usage
 
 
 class LLMError(Exception):
-    def __init__(self, message: str, *, retryable: bool):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        retry_after: float | None = None,
+        rate_limited: bool = False,
+    ):
         super().__init__(message)
         self.retryable = retryable
+        # Seconds the provider asked us to wait (HTTP retry-after); Celery uses it as the countdown.
+        self.retry_after = retry_after
+        # Rate-limit waits are normal on free tiers and use a separate, larger retry budget.
+        self.rate_limited = rate_limited
 
 
 class LLMProvider(Protocol):
