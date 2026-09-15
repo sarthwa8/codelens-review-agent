@@ -49,3 +49,25 @@ def parse_patch(patch: str | None) -> ChangedLines:
             new_line += 1
             previous_was_deletion = False
     return changed
+
+
+def commentable_lines(patch: str | None) -> set[int]:
+    """New-file line numbers a PR review comment may target on the RIGHT side of the diff.
+
+    GitHub only accepts inline comments on lines inside a hunk (added or context lines); a single
+    comment outside the diff makes the whole create-review request fail with 422.
+    """
+    lines: set[int] = set()
+    new_line = 0
+    in_hunk = False
+    for line in (patch or "").splitlines():
+        header = _HUNK_HEADER.match(line)
+        if header:
+            in_hunk = True
+            new_line = int(header.group(3))
+            continue
+        if not in_hunk or line.startswith(("\\", "-")):
+            continue
+        lines.add(new_line)  # "+" added or " " context line
+        new_line += 1
+    return lines

@@ -146,3 +146,24 @@ def test_large_file_extraction_survives_garbage_collection() -> None:
         gc.collect()
     assert len(chunks) == 600
     assert {c.name for c in chunks} == {f"f{i}" for i in range(600)}
+
+
+def test_commentable_lines_are_added_and_context_lines_inside_hunks() -> None:
+    from app.parsing.diff import commentable_lines
+
+    patch = (
+        "@@ -10,4 +10,5 @@ def f():\n"
+        " a\n"  # 10 context
+        "-b\n"  # deleted: not on the RIGHT side
+        "+c\n"  # 11
+        "+d\n"  # 12
+        " e\n"  # 13
+        "\\ No newline at end of file\n"
+        "@@ -40,2 +41,2 @@\n"
+        "-x\n"
+        "+y\n"  # 41
+        " z\n"  # 42
+    )
+    assert commentable_lines(patch) == {10, 11, 12, 13, 41, 42}
+    assert commentable_lines(None) == set()
+    assert 30 not in commentable_lines(patch)  # between hunks: GitHub would reject the review
