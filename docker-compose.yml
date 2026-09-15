@@ -21,6 +21,8 @@ x-app: &app
   volumes:
     # Local-git source mode (demo + replay benchmark) reads repositories from here.
     - ./.demo-repos:/repos:ro
+    # GitHub App private key (secrets/github-app.pem), mounted read-only, never baked into the image.
+    - ./secrets:/run/secrets:ro
   extra_hosts:
     - "host.docker.internal:host-gateway"
 
