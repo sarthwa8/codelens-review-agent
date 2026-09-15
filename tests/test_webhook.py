@@ -41,11 +41,13 @@ def push_payload(**overrides: Any) -> dict[str, Any]:
 class Recorder:
     def __init__(self, fail: bool = False):
         self.events: list[dict[str, Any]] = []
+        self.tasks: list[str] = []
         self.fail = fail
 
-    def __call__(self, event: dict[str, Any]) -> None:
+    def __call__(self, task_name: str, event: dict[str, Any]) -> None:
         if self.fail:
             raise ConnectionError("broker down")
+        self.tasks.append(task_name)
         self.events.append(event)
 
 
@@ -164,3 +166,68 @@ def test_enqueue_failure_returns_503_and_releases_dedupe_key(recorder: Recorder)
 def test_app_refuses_to_start_without_secret() -> None:
     with pytest.raises(RuntimeError, match="GITHUB_WEBHOOK_SECRET"):
         create_app(get_settings().model_copy(update={"github_webhook_secret": ""}))
+
+
+def pr_payload(action: str = "opened", **pr_overrides: Any) -> dict[str, Any]:
+    pull_request = {
+        "number": 12,
+        "state": "open",
+        "draft": False,
+        "title": "Add discounts",
+        "user": {"login": "dev"},
+        "head": {"sha": "c" * 40, "ref": "feature/discounts", "repo": {"id": 42}},
+        "base": {"sha": "d" * 40, "ref": "main"},
+    }
+    pull_request.update(pr_overrides)
+    return {
+        "action": action,
+        "number": 12,
+        "pull_request": pull_request,
+        "repository": {"id": 42, "full_name": "acme/shop", "default_branch": "main"},
+        "installation": {"id": 777},
+    }
+
+
+@pytest.mark.parametrize("action", ["opened", "synchronize", "reopened", "ready_for_review"])
+def test_pull_request_code_changes_are_enqueued(
+    client: TestClient, recorder: Recorder, action: str
+) -> None:
+    response = post(client, pr_payload(action), event="pull_request", delivery=f"pr-{action}")
+    assert response.status_code == 202
+    assert response.json()["task"] == "codelens.process_pull_request"
+    assert recorder.tasks == ["codelens.process_pull_request"]
+    [event] = recorder.events
+    assert (event["number"], event["head_sha"], event["base_sha"]) == (12, "c" * 40, "d" * 40)
+    assert (event["installation_id"], event["head_repo_id"], event["action"]) == (777, 42, action)
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        (pr_payload("labeled"), "pull_request action 'labeled' does not add code to review"),
+        (
+            pr_payload("closed", state="closed"),
+            "pull_request action 'closed' does not add code to review",
+        ),
+        (pr_payload("opened", draft=True), "draft pull request"),
+        (pr_payload("synchronize", state="closed"), "pull request is not open"),
+    ],
+)
+def test_pull_request_events_without_reviewable_code_are_ignored(
+    client: TestClient, recorder: Recorder, payload: dict, reason: str
+) -> None:
+    response = post(client, payload, event="pull_request")
+    assert response.json() == {"status": "ignored", "reason": reason}
+    assert recorder.events == []
+
+
+def test_push_carries_installation_id_and_task_name(client: TestClient, recorder: Recorder) -> None:
+    assert post(client, push_payload(installation={"id": 555})).status_code == 202
+    assert recorder.tasks == ["codelens.process_push"]
+    assert recorder.events[0]["installation_id"] == 555
+
+
+def test_installation_events_need_no_work(client: TestClient, recorder: Recorder) -> None:
+    response = post(client, {"action": "created", "installation": {"id": 1}}, event="installation")
+    assert response.json()["status"] == "ignored"
+    assert recorder.events == []
