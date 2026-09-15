@@ -14,10 +14,18 @@ class CommitFile:
 
 
 class SourceError(Exception):
-    def __init__(self, message: str, *, retryable: bool = False, retry_after: float | None = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool = False,
+        retry_after: float | None = None,
+        rate_limited: bool = False,
+    ):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
+        self.rate_limited = rate_limited
 
 
 class SourceProvider(Protocol):

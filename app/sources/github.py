@@ -51,7 +51,12 @@ class GitHubSource:
             retry_after = float(response.headers.get("retry-after") or 0) or max(
                 float(response.headers.get("x-ratelimit-reset", time.time() + 60)) - time.time(), 1
             )
-            raise SourceError("GitHub rate limit exceeded", retryable=True, retry_after=retry_after)
+            raise SourceError(
+                "GitHub rate limit exceeded",
+                retryable=True,
+                retry_after=retry_after,
+                rate_limited=True,
+            )
         if response.status_code >= 500:
             raise SourceError(f"GitHub {response.status_code}", retryable=True)
         return response
