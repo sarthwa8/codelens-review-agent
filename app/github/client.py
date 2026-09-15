@@ -48,7 +48,13 @@ class GitHubClient:
 
     @cached_property
     def _private_key(self) -> str:
-        return self._settings.github_app_private_key_pem()
+        try:
+            return self._settings.github_app_private_key_pem()
+        except OSError as exc:
+            raise SourceError(
+                f"GitHub App private key not readable at {self._settings.github_app_private_key_path}: "
+                "download it from the App settings and save it as secrets/github-app.pem"
+            ) from exc
 
     def app_jwt(self) -> str:
         issuer = self._settings.github_app_client_id or self._settings.github_app_id

@@ -142,3 +142,16 @@ def test_server_errors_are_retryable() -> None:
     with pytest.raises(SourceError) as caught:
         router.client(Settings(_env_file=None)).request("GET", "/repos/acme/shop", repo="acme/shop")
     assert caught.value.retryable and not caught.value.rate_limited
+
+
+def test_missing_private_key_file_is_a_clear_permanent_error(tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        github_app_client_id="Iv23test",
+        github_app_private_key_path=tmp_path / "missing.pem",
+    )
+    router = Router({})
+    with pytest.raises(SourceError, match=r"secrets/github-app\.pem") as caught:
+        router.client(settings).request("GET", "/repos/acme/shop", repo="acme/shop")
+    assert not caught.value.retryable
+    assert router.calls == []
