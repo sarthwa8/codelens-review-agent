@@ -10,7 +10,6 @@ keeps one slow/broken file from delaying or failing the rest, and scopes retries
 """
 
 import logging
-import random
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -28,21 +27,16 @@ from app.rag.embeddings import embedder_name
 from app.review import pipeline
 from app.review.pipeline import PipelineDeps
 from app.sources.base import CommitFile, SourceError
+from app.tasks.common import backoff as _backoff
 from app.tasks.deps import get_pipeline_deps
 from app.tasks.index_tasks import index_repo, update_index
+from app.tasks.publish_tasks import publish_unit, schedule_publish_for_review, start_check_run
 
 logger = logging.getLogger(__name__)
 
 INDEX_STALE_AFTER = timedelta(hours=2)
 INDEX_RETRY_AFTER_FAILURE = timedelta(minutes=15)
 REPO_UPSERT_ATTEMPTS = 3
-
-
-def _backoff(retries: int, exc: Exception) -> float:
-    hint = getattr(exc, "retry_after", None)
-    if hint:
-        return float(hint)
-    return min(300.0, 5 * 2**retries) + random.uniform(0, 3)  # jitter avoids synchronized retries
 
 
 def _parse_timestamp(value: str | None) -> datetime | None:
@@ -304,6 +298,9 @@ def review_commit(self: Task, commit_id: int) -> dict[str, int]:
             .all()
         )
 
+    start_check_run(deps, commit_id)
+    if not pending:
+        publish_unit.delay(commit_id)  # every file was skipped: publish right away
     for review_id in pending:
         review_file.delay(review_id)
     return {"reviews": len(pending)}
@@ -314,7 +311,7 @@ def review_file(self: Task, review_id: int) -> str:
     deps = get_pipeline_deps()
     retries = self.request.retries
     try:
-        return pipeline.review_file(review_id, deps, retries_used=retries)
+        outcome = pipeline.review_file(review_id, deps, retries_used=retries)
     except (LLMError, SourceError) as exc:
         if pipeline.will_retry(exc, retries, deps.settings):
             limit = (
@@ -325,8 +322,11 @@ def review_file(self: Task, review_id: int) -> str:
             raise self.retry(exc=exc, countdown=_backoff(retries, exc), max_retries=limit) from exc
         pipeline.mark_review_failed(deps.sessionmaker, review_id, str(exc))
         logger.error("review %s failed permanently: %s", review_id, exc)
-        return "failed"
+        outcome = "failed"
     except Exception as exc:
         pipeline.mark_review_failed(deps.sessionmaker, review_id, f"internal error: {exc}")
         logger.exception("review %s crashed", review_id)
-        return "failed"
+        outcome = "failed"
+    # Finished for good (not retrying): this unit, and units sharing the result, may now be complete.
+    schedule_publish_for_review(deps, review_id)
+    return outcome
