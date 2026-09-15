@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     rag_max_queries: int = 6  # at most this many changed chunks are used as queries
 
     # --- LLM ---
-    llm_provider: Literal["fake", "anthropic", "openai", "ollama"] = "fake"
+    llm_provider: Literal["fake", "anthropic", "openai", "ollama", "groq"] = "fake"
     llm_max_output_tokens: int = 2048
     anthropic_api_key: str | None = None
     anthropic_model: str = "claude-sonnet-5"
@@ -45,6 +45,15 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-5-mini"
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5-coder:7b"
+    groq_api_key: str | None = None
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    # gpt-oss-120b is Groq's production code-capable model; the Llama models are Enterprise-only now.
+    groq_model: str = "openai/gpt-oss-120b"
+    groq_reasoning_effort: Literal["low", "medium", "high"] = "low"
+    # Groq's free tier allows 8K tokens/minute and counts the *requested* output budget too, so a
+    # single request must stay well below that: ~12K chars of prompt (~4K tokens) + 1.8K output.
+    groq_max_prompt_chars: int = 12_000
+    groq_max_output_tokens: int = 1_800
     fake_llm_delay_ms: int = 15
 
     # --- Review pipeline limits ---
@@ -53,6 +62,8 @@ class Settings(BaseSettings):
     max_prompt_chars: int = 60_000
     cache_lease_seconds: int = 300
     task_max_retries: int = 3
+    # Rate-limit waits (HTTP 429) are expected on free tiers and get a separate, larger budget.
+    rate_limit_max_retries: int = 30
 
     # --- Streaming ---
     stream_ttl_seconds: int = 3600
@@ -71,7 +82,20 @@ class Settings(BaseSettings):
             "anthropic": self.anthropic_model,
             "openai": self.openai_model,
             "ollama": self.ollama_model,
+            "groq": self.groq_model,
         }[self.llm_provider]
+
+    @property
+    def effective_max_prompt_chars(self) -> int:
+        if self.llm_provider == "groq":
+            return min(self.max_prompt_chars, self.groq_max_prompt_chars)
+        return self.max_prompt_chars
+
+    @property
+    def effective_max_output_tokens(self) -> int:
+        if self.llm_provider == "groq":
+            return min(self.llm_max_output_tokens, self.groq_max_output_tokens)
+        return self.llm_max_output_tokens
 
 
 @lru_cache
