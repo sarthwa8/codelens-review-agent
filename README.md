@@ -61,8 +61,19 @@ https://smee.io, click **Start a new channel**, and keep the channel URL for the
 | Expire user authorization tokens | on (default) |
 | Webhook URL | your smee channel URL (later: `https://<your-domain>/webhooks/github`) |
 | Webhook secret | any random string, also put it in `GITHUB_WEBHOOK_SECRET` |
-| Repository permissions | **Checks**: read & write · **Contents**: read-only · **Pull requests**: read & write · Metadata: read-only |
 | Subscribe to events | **Push**, **Pull request** |
+
+Under **Repository permissions**, set exactly these four and leave every other one on *No access*:
+
+| Permission | Access | What CodeLens calls it for |
+|---|---|---|
+| Checks | **Read and write** | `POST`/`PATCH /repos/{repo}/check-runs` — the "CodeLens" check and its annotations |
+| Contents | **Read-only** | `/commits/{sha}`, `/contents/{path}`, `/tarball/{ref}` — the diff, the changed files, the RAG index |
+| Pull requests | **Read and write** | `/pulls`, `/pulls/{n}/files`, `POST /pulls/{n}/reviews` — the PR diff and the review |
+| Metadata | Read-only | Mandatory; GitHub selects it automatically once you pick any of the above |
+
+No account or organization permissions are needed. `github_app_authorization` (sent when a user revokes
+the App) has no checkbox: GitHub always delivers it.
 
 After creating it, copy the **App ID**, **Client ID** and the app's URL name (slug) into `.env`,
 generate a **client secret** (`GITHUB_APP_CLIENT_SECRET`), and **generate a private key**. Save the
